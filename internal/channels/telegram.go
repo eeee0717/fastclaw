@@ -3,7 +3,11 @@ package channels
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,9 +23,30 @@ var mentionRe = regexp.MustCompile(`@(\w+)`)
 // markdownV2Escaper escapes special characters for Telegram MarkdownV2.
 var markdownV2SpecialChars = []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 
+const (
+	telegramCaptionLimit  = 1024
+	telegramMediaGroupMax = 10
+)
+
+var telegramImageExtensions = map[string]struct{}{
+	".jpg":  {},
+	".jpeg": {},
+	".png":  {},
+	".webp": {},
+}
+
+type telegramAPI interface {
+	GetUpdatesChan(tgbotapi.UpdateConfig) tgbotapi.UpdatesChannel
+	StopReceivingUpdates()
+	GetFileDirectURL(string) (string, error)
+	Request(tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
+	Send(tgbotapi.Chattable) (tgbotapi.Message, error)
+	SendMediaGroup(tgbotapi.MediaGroupConfig) ([]tgbotapi.Message, error)
+}
+
 // Telegram implements the Channel interface for Telegram Bot API.
 type Telegram struct {
-	bot         *tgbotapi.BotAPI
+	bot         telegramAPI
 	bus         *bus.MessageBus
 	accountID   string
 	botUsername string
@@ -249,16 +274,24 @@ func (t *Telegram) SendMessage(msg bus.OutboundMessage) error {
 		return fmt.Errorf("parse chat ID: %w", err)
 	}
 
+	if len(msg.MediaPaths) > 0 {
+		return t.sendMediaMessage(id, msg)
+	}
+
+	return t.sendTextMessage(id, msg)
+}
+
+func (t *Telegram) sendTextMessage(chatID int64, msg bus.OutboundMessage) error {
 	// Edit existing message
 	if msg.EditMsgID != "" {
-		return t.editMessage(id, msg)
+		return t.editMessage(chatID, msg)
 	}
 
 	// Split long messages at paragraph boundaries
 	chunks := splitTelegramMessage(msg.Text)
 
 	for i, chunk := range chunks {
-		if err := t.sendSingleMessage(id, chunk, msg, i == 0); err != nil {
+		if err := t.sendSingleMessage(chatID, chunk, msg, i == 0); err != nil {
 			return err
 		}
 		// Small delay between split messages
@@ -267,6 +300,41 @@ func (t *Telegram) SendMessage(msg bus.OutboundMessage) error {
 		}
 	}
 	return nil
+}
+
+func (t *Telegram) sendMediaMessage(chatID int64, msg bus.OutboundMessage) error {
+	if msg.EditMsgID != "" {
+		return fmt.Errorf("telegram does not support editing media messages")
+	}
+	if len(msg.Buttons) > 0 {
+		return fmt.Errorf("telegram does not support inline keyboards on media messages")
+	}
+
+	mediaPaths, err := normalizeTelegramMediaPaths(msg.MediaPaths)
+	if err != nil {
+		return err
+	}
+
+	caption, overflowText := splitTelegramCaption(msg.Text)
+
+	if len(mediaPaths) == 1 {
+		if err := t.sendPhoto(chatID, mediaPaths[0], caption, msg.ParseMode, msg.ReplyToMsgID); err != nil {
+			return err
+		}
+	} else {
+		if err := t.sendPhotoAlbum(chatID, mediaPaths, caption, msg.ParseMode, msg.ReplyToMsgID); err != nil {
+			return err
+		}
+	}
+
+	if overflowText == "" {
+		return nil
+	}
+
+	return t.sendTextMessage(chatID, bus.OutboundMessage{
+		Text:      overflowText,
+		ParseMode: msg.ParseMode,
+	})
 }
 
 func (t *Telegram) sendSingleMessage(chatID int64, text string, msg bus.OutboundMessage, isFirst bool) error {
@@ -309,6 +377,111 @@ func (t *Telegram) sendSingleMessage(chatID int64, text string, msg bus.Outbound
 		}
 	}
 	return err
+}
+
+func (t *Telegram) sendPhotoAlbum(chatID int64, mediaPaths []string, caption string, parseMode string, replyToMsgID string) error {
+	for start := 0; start < len(mediaPaths); start += telegramMediaGroupMax {
+		end := start + telegramMediaGroupMax
+		if end > len(mediaPaths) {
+			end = len(mediaPaths)
+		}
+
+		batch := mediaPaths[start:end]
+		batchCaption := ""
+		batchReplyTo := ""
+		if start == 0 {
+			batchCaption = caption
+			batchReplyTo = replyToMsgID
+		}
+
+		if len(batch) == 1 {
+			if err := t.sendPhoto(chatID, batch[0], batchCaption, parseMode, batchReplyTo); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := t.sendMediaGroupBatch(chatID, batch, batchCaption, parseMode, batchReplyTo); err != nil {
+			slog.Warn("telegram media group failed, falling back to individual photos",
+				"chat_id", chatID,
+				"batch_size", len(batch),
+				"error", err,
+			)
+			if err := t.sendPhotosIndividually(chatID, batch, batchCaption, parseMode, batchReplyTo); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (t *Telegram) sendMediaGroupBatch(chatID int64, mediaPaths []string, caption string, parseMode string, replyToMsgID string) error {
+	replyID := parseTelegramReplyToMessageID(replyToMsgID)
+	var lastErr error
+
+	for _, mode := range telegramParseModes(parseMode) {
+		media := make([]interface{}, 0, len(mediaPaths))
+		for i, path := range mediaPaths {
+			photo := tgbotapi.NewInputMediaPhoto(tgbotapi.FilePath(path))
+			if i == 0 && caption != "" {
+				photo.Caption = formatTelegramCaption(caption, mode)
+				photo.ParseMode = mode
+			}
+			media = append(media, photo)
+		}
+
+		cfg := tgbotapi.NewMediaGroup(chatID, media)
+		if replyID > 0 {
+			cfg.ReplyToMessageID = replyID
+		}
+
+		if _, err := t.bot.SendMediaGroup(cfg); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+
+	return lastErr
+}
+
+func (t *Telegram) sendPhotosIndividually(chatID int64, mediaPaths []string, caption string, parseMode string, replyToMsgID string) error {
+	for i, path := range mediaPaths {
+		photoCaption := ""
+		photoReplyTo := ""
+		if i == 0 {
+			photoCaption = caption
+			photoReplyTo = replyToMsgID
+		}
+		if err := t.sendPhoto(chatID, path, photoCaption, parseMode, photoReplyTo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *Telegram) sendPhoto(chatID int64, mediaPath string, caption string, parseMode string, replyToMsgID string) error {
+	replyID := parseTelegramReplyToMessageID(replyToMsgID)
+	var lastErr error
+
+	for _, mode := range telegramParseModes(parseMode) {
+		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FilePath(mediaPath))
+		if caption != "" {
+			photo.Caption = formatTelegramCaption(caption, mode)
+			photo.ParseMode = mode
+		}
+		if replyID > 0 {
+			photo.ReplyToMessageID = replyID
+		}
+
+		if _, err := t.bot.Send(photo); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+
+	return lastErr
 }
 
 func (t *Telegram) editMessage(chatID int64, msg bus.OutboundMessage) error {
@@ -354,6 +527,82 @@ func (t *Telegram) SendTyping(chatID string) error {
 	action := tgbotapi.NewChatAction(id, tgbotapi.ChatTyping)
 	_, err = t.bot.Send(action)
 	return err
+}
+
+func normalizeTelegramMediaPaths(paths []string) ([]string, error) {
+	normalized := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("telegram media path %q: %w", path, err)
+		}
+		if !isTelegramImagePath(path) {
+			return nil, fmt.Errorf("telegram media path %q is not a supported image", path)
+		}
+		normalized = append(normalized, path)
+	}
+	if len(normalized) == 0 {
+		return nil, fmt.Errorf("telegram media message has no valid image paths")
+	}
+	return normalized, nil
+}
+
+func isTelegramImagePath(path string) bool {
+	if _, ok := telegramImageExtensions[strings.ToLower(filepath.Ext(path))]; ok {
+		return true
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	header := make([]byte, 512)
+	n, err := f.Read(header)
+	if err != nil && err != io.EOF {
+		return false
+	}
+
+	return strings.HasPrefix(http.DetectContentType(header[:n]), "image/")
+}
+
+func splitTelegramCaption(text string) (caption string, overflow string) {
+	if len(text) <= telegramCaptionLimit {
+		return text, ""
+	}
+	return "", text
+}
+
+func parseTelegramReplyToMessageID(replyToMsgID string) int {
+	replyID, err := strconv.Atoi(replyToMsgID)
+	if err != nil {
+		return 0
+	}
+	return replyID
+}
+
+func telegramParseModes(parseMode string) []string {
+	switch parseMode {
+	case "MarkdownV2":
+		return []string{"MarkdownV2", "HTML", ""}
+	case "HTML":
+		return []string{"HTML", ""}
+	case "":
+		return []string{""}
+	default:
+		return []string{parseMode, ""}
+	}
+}
+
+func formatTelegramCaption(caption string, parseMode string) string {
+	if parseMode == "MarkdownV2" {
+		return escapeMarkdownV2(caption)
+	}
+	return caption
 }
 
 // escapeMarkdownV2 escapes special characters for Telegram MarkdownV2 format.
