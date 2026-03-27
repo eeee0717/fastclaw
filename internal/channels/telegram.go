@@ -402,14 +402,7 @@ func (t *Telegram) sendPhotoAlbum(chatID int64, mediaPaths []string, caption str
 		}
 
 		if err := t.sendMediaGroupBatch(chatID, batch, batchCaption, parseMode, batchReplyTo); err != nil {
-			slog.Warn("telegram media group failed, falling back to individual photos",
-				"chat_id", chatID,
-				"batch_size", len(batch),
-				"error", err,
-			)
-			if err := t.sendPhotosIndividually(chatID, batch, batchCaption, parseMode, batchReplyTo); err != nil {
-				return err
-			}
+			return err
 		}
 	}
 	return nil
@@ -444,22 +437,6 @@ func (t *Telegram) sendMediaGroupBatch(chatID int64, mediaPaths []string, captio
 
 	return lastErr
 }
-
-func (t *Telegram) sendPhotosIndividually(chatID int64, mediaPaths []string, caption string, parseMode string, replyToMsgID string) error {
-	for i, path := range mediaPaths {
-		photoCaption := ""
-		photoReplyTo := ""
-		if i == 0 {
-			photoCaption = caption
-			photoReplyTo = replyToMsgID
-		}
-		if err := t.sendPhoto(chatID, path, photoCaption, parseMode, photoReplyTo); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (t *Telegram) sendPhoto(chatID int64, mediaPath string, caption string, parseMode string, replyToMsgID string) error {
 	replyID := parseTelegramReplyToMessageID(replyToMsgID)
 	var lastErr error

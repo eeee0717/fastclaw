@@ -156,7 +156,7 @@ func TestTelegramSendMessageLongTextSendsExtraMessage(t *testing.T) {
 	}
 }
 
-func TestTelegramSendMessageFallsBackToIndividualPhotos(t *testing.T) {
+func TestTelegramSendMessageReturnsErrorWhenMediaGroupFails(t *testing.T) {
 	tg, fake := newTestTelegram()
 	fake.mediaGroupErr = errors.New("media group failed")
 	first := writeTestImage(t, "one.png")
@@ -164,27 +164,18 @@ func TestTelegramSendMessageFallsBackToIndividualPhotos(t *testing.T) {
 
 	err := tg.SendMessage(bus.OutboundMessage{
 		ChatID:     "42",
-		Text:       "fallback caption",
+		Text:       "album caption",
 		MediaPaths: []string{first, second},
 	})
-	if err != nil {
-		t.Fatalf("SendMessage returned error: %v", err)
+	if err == nil {
+		t.Fatal("expected SendMessage to return error when media group fails")
 	}
 
 	if len(fake.mediaGroupCalls) != 1 {
 		t.Fatalf("expected 1 media group attempt, got %d", len(fake.mediaGroupCalls))
 	}
-	if len(fake.sendCalls) != 2 {
-		t.Fatalf("expected 2 fallback photo sends, got %d", len(fake.sendCalls))
-	}
-
-	firstPhoto := fake.sendCalls[0].(tgbotapi.PhotoConfig)
-	secondPhoto := fake.sendCalls[1].(tgbotapi.PhotoConfig)
-	if firstPhoto.Caption != "fallback caption" {
-		t.Fatalf("expected first fallback caption %q, got %q", "fallback caption", firstPhoto.Caption)
-	}
-	if secondPhoto.Caption != "" {
-		t.Fatalf("expected second fallback caption to be empty, got %q", secondPhoto.Caption)
+	if len(fake.sendCalls) != 0 {
+		t.Fatalf("expected no fallback photo sends, got %d", len(fake.sendCalls))
 	}
 }
 
