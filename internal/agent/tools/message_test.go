@@ -56,6 +56,41 @@ func TestMessageToolUsesCurrentConversationDefaults(t *testing.T) {
 	}
 }
 
+func TestMessageToolSupportsFilePaths(t *testing.T) {
+	mb := bus.New()
+	tool := makeMessageTool(mb)
+
+	ctx := WithMessageDefaults(context.Background(), bus.InboundMessage{
+		Channel:   "telegram",
+		AccountID: "bot-1",
+		ChatID:    "chat-123",
+	})
+
+	args, err := json.Marshal(messageArgs{
+		Text:      "document caption",
+		FilePaths: []string{"/tmp/test.pdf"},
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	if _, err := tool(ctx, args); err != nil {
+		t.Fatalf("tool returned error: %v", err)
+	}
+
+	select {
+	case msg := <-mb.Outbound:
+		if len(msg.FilePaths) != 1 || msg.FilePaths[0] != "/tmp/test.pdf" {
+			t.Fatalf("unexpected file paths: %#v", msg.FilePaths)
+		}
+		if len(msg.MediaPaths) != 0 {
+			t.Fatalf("expected no media paths, got %#v", msg.MediaPaths)
+		}
+	default:
+		t.Fatal("expected outbound message")
+	}
+}
+
 func TestMessageToolAllowsExplicitRoutingOverrides(t *testing.T) {
 	mb := bus.New()
 	tool := makeMessageTool(mb)
@@ -105,6 +140,28 @@ func TestMessageToolRequiresPayload(t *testing.T) {
 	}
 
 	if _, err := tool(ctx, args); err == nil {
-		t.Fatal("expected error when both text and media_paths are empty")
+		t.Fatal("expected error when text, media_paths, and file_paths are empty")
+	}
+}
+
+func TestMessageToolRejectsMixedMediaAndFiles(t *testing.T) {
+	mb := bus.New()
+	tool := makeMessageTool(mb)
+
+	ctx := WithMessageDefaults(context.Background(), bus.InboundMessage{
+		Channel: "telegram",
+		ChatID:  "chat-123",
+	})
+
+	args, err := json.Marshal(messageArgs{
+		MediaPaths: []string{"/tmp/test.png"},
+		FilePaths:  []string{"/tmp/test.pdf"},
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	if _, err := tool(ctx, args); err == nil {
+		t.Fatal("expected error when media_paths and file_paths are mixed")
 	}
 }

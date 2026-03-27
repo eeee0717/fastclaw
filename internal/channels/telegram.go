@@ -274,6 +274,12 @@ func (t *Telegram) SendMessage(msg bus.OutboundMessage) error {
 		return fmt.Errorf("parse chat ID: %w", err)
 	}
 
+	if len(msg.MediaPaths) > 0 && len(msg.FilePaths) > 0 {
+		return fmt.Errorf("telegram does not support mixing image and file attachments in one message")
+	}
+	if len(msg.FilePaths) > 0 {
+		return t.sendFileMessage(id, msg)
+	}
 	if len(msg.MediaPaths) > 0 {
 		return t.sendMediaMessage(id, msg)
 	}
@@ -303,11 +309,8 @@ func (t *Telegram) sendTextMessage(chatID int64, msg bus.OutboundMessage) error 
 }
 
 func (t *Telegram) sendMediaMessage(chatID int64, msg bus.OutboundMessage) error {
-	if msg.EditMsgID != "" {
-		return fmt.Errorf("telegram does not support editing media messages")
-	}
-	if len(msg.Buttons) > 0 {
-		return fmt.Errorf("telegram does not support inline keyboards on media messages")
+	if err := validateTelegramAttachmentMessage(msg); err != nil {
+		return err
 	}
 
 	mediaPaths, err := normalizeTelegramMediaPaths(msg.MediaPaths)
@@ -323,6 +326,38 @@ func (t *Telegram) sendMediaMessage(chatID int64, msg bus.OutboundMessage) error
 		}
 	} else {
 		if err := t.sendPhotoAlbum(chatID, mediaPaths, caption, msg.ParseMode, msg.ReplyToMsgID); err != nil {
+			return err
+		}
+	}
+
+	if overflowText == "" {
+		return nil
+	}
+
+	return t.sendTextMessage(chatID, bus.OutboundMessage{
+		Text:      overflowText,
+		ParseMode: msg.ParseMode,
+	})
+}
+
+func (t *Telegram) sendFileMessage(chatID int64, msg bus.OutboundMessage) error {
+	if err := validateTelegramAttachmentMessage(msg); err != nil {
+		return err
+	}
+
+	filePaths, err := normalizeTelegramFilePaths(msg.FilePaths)
+	if err != nil {
+		return err
+	}
+
+	caption, overflowText := splitTelegramCaption(msg.Text)
+
+	if len(filePaths) == 1 {
+		if err := t.sendDocument(chatID, filePaths[0], caption, msg.ParseMode, msg.ReplyToMsgID); err != nil {
+			return err
+		}
+	} else {
+		if err := t.sendDocumentAlbum(chatID, filePaths, caption, msg.ParseMode, msg.ReplyToMsgID); err != nil {
 			return err
 		}
 	}
@@ -437,6 +472,66 @@ func (t *Telegram) sendMediaGroupBatch(chatID int64, mediaPaths []string, captio
 
 	return lastErr
 }
+
+func (t *Telegram) sendDocumentAlbum(chatID int64, filePaths []string, caption string, parseMode string, replyToMsgID string) error {
+	for start := 0; start < len(filePaths); start += telegramMediaGroupMax {
+		end := start + telegramMediaGroupMax
+		if end > len(filePaths) {
+			end = len(filePaths)
+		}
+
+		batch := filePaths[start:end]
+		batchCaption := ""
+		batchReplyTo := ""
+		if start == 0 {
+			batchCaption = caption
+			batchReplyTo = replyToMsgID
+		}
+
+		if len(batch) == 1 {
+			if err := t.sendDocument(chatID, batch[0], batchCaption, parseMode, batchReplyTo); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := t.sendDocumentGroupBatch(chatID, batch, batchCaption, parseMode, batchReplyTo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *Telegram) sendDocumentGroupBatch(chatID int64, filePaths []string, caption string, parseMode string, replyToMsgID string) error {
+	replyID := parseTelegramReplyToMessageID(replyToMsgID)
+	var lastErr error
+
+	for _, mode := range telegramParseModes(parseMode) {
+		media := make([]interface{}, 0, len(filePaths))
+		for i, path := range filePaths {
+			doc := tgbotapi.NewInputMediaDocument(tgbotapi.FilePath(path))
+			if i == 0 && caption != "" {
+				doc.Caption = formatTelegramCaption(caption, mode)
+				doc.ParseMode = mode
+			}
+			media = append(media, doc)
+		}
+
+		cfg := tgbotapi.NewMediaGroup(chatID, media)
+		if replyID > 0 {
+			cfg.ReplyToMessageID = replyID
+		}
+
+		if _, err := t.bot.SendMediaGroup(cfg); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+
+	return lastErr
+}
+
 func (t *Telegram) sendPhoto(chatID int64, mediaPath string, caption string, parseMode string, replyToMsgID string) error {
 	replyID := parseTelegramReplyToMessageID(replyToMsgID)
 	var lastErr error
@@ -452,6 +547,30 @@ func (t *Telegram) sendPhoto(chatID int64, mediaPath string, caption string, par
 		}
 
 		if _, err := t.bot.Send(photo); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+
+	return lastErr
+}
+
+func (t *Telegram) sendDocument(chatID int64, filePath string, caption string, parseMode string, replyToMsgID string) error {
+	replyID := parseTelegramReplyToMessageID(replyToMsgID)
+	var lastErr error
+
+	for _, mode := range telegramParseModes(parseMode) {
+		doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
+		if caption != "" {
+			doc.Caption = formatTelegramCaption(caption, mode)
+			doc.ParseMode = mode
+		}
+		if replyID > 0 {
+			doc.ReplyToMessageID = replyID
+		}
+
+		if _, err := t.bot.Send(doc); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -527,6 +646,28 @@ func normalizeTelegramMediaPaths(paths []string) ([]string, error) {
 	return normalized, nil
 }
 
+func normalizeTelegramFilePaths(paths []string) ([]string, error) {
+	normalized := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("telegram file path %q: %w", path, err)
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("telegram file path %q is a directory", path)
+		}
+		normalized = append(normalized, path)
+	}
+	if len(normalized) == 0 {
+		return nil, fmt.Errorf("telegram file message has no valid file paths")
+	}
+	return normalized, nil
+}
+
 func isTelegramImagePath(path string) bool {
 	if _, ok := telegramImageExtensions[strings.ToLower(filepath.Ext(path))]; ok {
 		return true
@@ -552,6 +693,16 @@ func splitTelegramCaption(text string) (caption string, overflow string) {
 		return text, ""
 	}
 	return "", text
+}
+
+func validateTelegramAttachmentMessage(msg bus.OutboundMessage) error {
+	if msg.EditMsgID != "" {
+		return fmt.Errorf("telegram does not support editing attachment messages")
+	}
+	if len(msg.Buttons) > 0 {
+		return fmt.Errorf("telegram does not support inline keyboards on attachment messages")
+	}
+	return nil
 }
 
 func parseTelegramReplyToMessageID(replyToMsgID string) int {

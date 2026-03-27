@@ -79,6 +79,39 @@ func TestTelegramSendMessageSinglePhotoUsesCaption(t *testing.T) {
 	}
 }
 
+func TestTelegramSendMessageSingleDocumentUsesCaption(t *testing.T) {
+	tg, fake := newTestTelegram()
+	path := writeTestFile(t, "one.pdf")
+
+	err := tg.SendMessage(bus.OutboundMessage{
+		ChatID:    "42",
+		Text:      "hello file",
+		FilePaths: []string{path},
+	})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+
+	if len(fake.sendCalls) != 1 {
+		t.Fatalf("expected 1 send call, got %d", len(fake.sendCalls))
+	}
+
+	doc, ok := fake.sendCalls[0].(tgbotapi.DocumentConfig)
+	if !ok {
+		t.Fatalf("expected DocumentConfig, got %T", fake.sendCalls[0])
+	}
+	if doc.Caption != "hello file" {
+		t.Fatalf("expected caption %q, got %q", "hello file", doc.Caption)
+	}
+	filePath, ok := doc.File.(tgbotapi.FilePath)
+	if !ok {
+		t.Fatalf("expected FilePath, got %T", doc.File)
+	}
+	if string(filePath) != path {
+		t.Fatalf("expected file path %q, got %q", path, string(filePath))
+	}
+}
+
 func TestTelegramSendMessageMultiPhotoUsesMediaGroup(t *testing.T) {
 	tg, fake := newTestTelegram()
 	first := writeTestImage(t, "one.png")
@@ -120,6 +153,47 @@ func TestTelegramSendMessageMultiPhotoUsesMediaGroup(t *testing.T) {
 	}
 }
 
+func TestTelegramSendMessageMultiDocumentUsesMediaGroup(t *testing.T) {
+	tg, fake := newTestTelegram()
+	first := writeTestFile(t, "one.pdf")
+	second := writeTestFile(t, "two.pdf")
+
+	err := tg.SendMessage(bus.OutboundMessage{
+		ChatID:    "42",
+		Text:      "documents caption",
+		FilePaths: []string{first, second},
+	})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+
+	if len(fake.mediaGroupCalls) != 1 {
+		t.Fatalf("expected 1 media group call, got %d", len(fake.mediaGroupCalls))
+	}
+	if len(fake.sendCalls) != 0 {
+		t.Fatalf("expected no direct send calls, got %d", len(fake.sendCalls))
+	}
+
+	cfg := fake.mediaGroupCalls[0]
+	if len(cfg.Media) != 2 {
+		t.Fatalf("expected 2 media items, got %d", len(cfg.Media))
+	}
+	firstDoc, ok := cfg.Media[0].(tgbotapi.InputMediaDocument)
+	if !ok {
+		t.Fatalf("expected first media item to be InputMediaDocument, got %T", cfg.Media[0])
+	}
+	secondDoc, ok := cfg.Media[1].(tgbotapi.InputMediaDocument)
+	if !ok {
+		t.Fatalf("expected second media item to be InputMediaDocument, got %T", cfg.Media[1])
+	}
+	if firstDoc.Caption != "documents caption" {
+		t.Fatalf("expected first caption %q, got %q", "documents caption", firstDoc.Caption)
+	}
+	if secondDoc.Caption != "" {
+		t.Fatalf("expected second caption to be empty, got %q", secondDoc.Caption)
+	}
+}
+
 func TestTelegramSendMessageLongTextSendsExtraMessage(t *testing.T) {
 	tg, fake := newTestTelegram()
 	first := writeTestImage(t, "one.png")
@@ -156,6 +230,42 @@ func TestTelegramSendMessageLongTextSendsExtraMessage(t *testing.T) {
 	}
 }
 
+func TestTelegramSendMessageLongTextForDocumentsSendsExtraMessage(t *testing.T) {
+	tg, fake := newTestTelegram()
+	first := writeTestFile(t, "one.pdf")
+	second := writeTestFile(t, "two.pdf")
+	longText := strings.Repeat("a", telegramCaptionLimit+1)
+
+	err := tg.SendMessage(bus.OutboundMessage{
+		ChatID:    "42",
+		Text:      longText,
+		FilePaths: []string{first, second},
+	})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+
+	if len(fake.mediaGroupCalls) != 1 {
+		t.Fatalf("expected 1 media group call, got %d", len(fake.mediaGroupCalls))
+	}
+	if len(fake.sendCalls) != 1 {
+		t.Fatalf("expected 1 text send call, got %d", len(fake.sendCalls))
+	}
+
+	firstDoc := fake.mediaGroupCalls[0].Media[0].(tgbotapi.InputMediaDocument)
+	if firstDoc.Caption != "" {
+		t.Fatalf("expected empty media caption for long text, got %q", firstDoc.Caption)
+	}
+
+	textMsg, ok := fake.sendCalls[0].(tgbotapi.MessageConfig)
+	if !ok {
+		t.Fatalf("expected MessageConfig, got %T", fake.sendCalls[0])
+	}
+	if textMsg.Text != longText {
+		t.Fatalf("expected text %q, got %q", longText, textMsg.Text)
+	}
+}
+
 func TestTelegramSendMessageReturnsErrorWhenMediaGroupFails(t *testing.T) {
 	tg, fake := newTestTelegram()
 	fake.mediaGroupErr = errors.New("media group failed")
@@ -176,6 +286,29 @@ func TestTelegramSendMessageReturnsErrorWhenMediaGroupFails(t *testing.T) {
 	}
 	if len(fake.sendCalls) != 0 {
 		t.Fatalf("expected no fallback photo sends, got %d", len(fake.sendCalls))
+	}
+}
+
+func TestTelegramSendMessageReturnsErrorWhenDocumentGroupFails(t *testing.T) {
+	tg, fake := newTestTelegram()
+	fake.mediaGroupErr = errors.New("media group failed")
+	first := writeTestFile(t, "one.pdf")
+	second := writeTestFile(t, "two.pdf")
+
+	err := tg.SendMessage(bus.OutboundMessage{
+		ChatID:    "42",
+		Text:      "documents caption",
+		FilePaths: []string{first, second},
+	})
+	if err == nil {
+		t.Fatal("expected SendMessage to return error when document group fails")
+	}
+
+	if len(fake.mediaGroupCalls) != 1 {
+		t.Fatalf("expected 1 media group attempt, got %d", len(fake.mediaGroupCalls))
+	}
+	if len(fake.sendCalls) != 0 {
+		t.Fatalf("expected no fallback document sends, got %d", len(fake.sendCalls))
 	}
 }
 
@@ -211,6 +344,41 @@ func TestTelegramSendMessageSplitsAlbumsAboveTelegramLimit(t *testing.T) {
 	}
 }
 
+func TestTelegramSendMessageSplitsDocumentAlbumsAboveTelegramLimit(t *testing.T) {
+	tg, fake := newTestTelegram()
+	var paths []string
+	for i := 0; i < telegramMediaGroupMax+1; i++ {
+		paths = append(paths, writeTestFile(t, filepath.Join("batch", "doc"+strconv.Itoa(i)+".pdf")))
+	}
+
+	err := tg.SendMessage(bus.OutboundMessage{
+		ChatID:    "42",
+		Text:      "batch caption",
+		FilePaths: paths,
+	})
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+
+	if len(fake.mediaGroupCalls) != 1 {
+		t.Fatalf("expected 1 media group call, got %d", len(fake.mediaGroupCalls))
+	}
+	if len(fake.mediaGroupCalls[0].Media) != telegramMediaGroupMax {
+		t.Fatalf("expected first media group to contain %d items, got %d", telegramMediaGroupMax, len(fake.mediaGroupCalls[0].Media))
+	}
+	if len(fake.sendCalls) != 1 {
+		t.Fatalf("expected 1 trailing document send, got %d", len(fake.sendCalls))
+	}
+
+	lastDoc, ok := fake.sendCalls[0].(tgbotapi.DocumentConfig)
+	if !ok {
+		t.Fatalf("expected DocumentConfig, got %T", fake.sendCalls[0])
+	}
+	if lastDoc.Caption != "" {
+		t.Fatalf("expected trailing document caption to be empty, got %q", lastDoc.Caption)
+	}
+}
+
 func TestTelegramSendMessageRejectsButtonsWithMedia(t *testing.T) {
 	tg, fake := newTestTelegram()
 	path := writeTestImage(t, "one.png")
@@ -231,6 +399,26 @@ func TestTelegramSendMessageRejectsButtonsWithMedia(t *testing.T) {
 	}
 }
 
+func TestTelegramSendMessageRejectsButtonsWithFiles(t *testing.T) {
+	tg, fake := newTestTelegram()
+	path := writeTestFile(t, "one.pdf")
+
+	err := tg.SendMessage(bus.OutboundMessage{
+		ChatID:    "42",
+		Text:      "hello",
+		FilePaths: []string{path},
+		Buttons: [][]bus.OutboundButton{
+			{{Text: "Open", URL: "https://example.com"}},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for file buttons, got nil")
+	}
+	if len(fake.sendCalls) != 0 || len(fake.mediaGroupCalls) != 0 {
+		t.Fatal("expected no Telegram API calls when file buttons are rejected")
+	}
+}
+
 func TestTelegramSendMessageRejectsEditWithMedia(t *testing.T) {
 	tg, fake := newTestTelegram()
 	path := writeTestImage(t, "one.png")
@@ -248,6 +436,41 @@ func TestTelegramSendMessageRejectsEditWithMedia(t *testing.T) {
 	}
 }
 
+func TestTelegramSendMessageRejectsEditWithFiles(t *testing.T) {
+	tg, fake := newTestTelegram()
+	path := writeTestFile(t, "one.pdf")
+
+	err := tg.SendMessage(bus.OutboundMessage{
+		ChatID:    "42",
+		EditMsgID: "100",
+		FilePaths: []string{path},
+	})
+	if err == nil {
+		t.Fatal("expected error for file edits, got nil")
+	}
+	if len(fake.sendCalls) != 0 || len(fake.mediaGroupCalls) != 0 {
+		t.Fatal("expected no Telegram API calls when file edit is rejected")
+	}
+}
+
+func TestTelegramSendMessageRejectsMixedMediaAndFiles(t *testing.T) {
+	tg, fake := newTestTelegram()
+	image := writeTestImage(t, "one.png")
+	file := writeTestFile(t, "one.pdf")
+
+	err := tg.SendMessage(bus.OutboundMessage{
+		ChatID:     "42",
+		MediaPaths: []string{image},
+		FilePaths:  []string{file},
+	})
+	if err == nil {
+		t.Fatal("expected error when mixing media and file attachments")
+	}
+	if len(fake.sendCalls) != 0 || len(fake.mediaGroupCalls) != 0 {
+		t.Fatal("expected no Telegram API calls when attachment types are mixed")
+	}
+}
+
 func TestTelegramSendMessageRejectsNonImagePath(t *testing.T) {
 	tg, _ := newTestTelegram()
 	dir := t.TempDir()
@@ -262,6 +485,19 @@ func TestTelegramSendMessageRejectsNonImagePath(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for non-image media path, got nil")
+	}
+}
+
+func TestTelegramSendMessageRejectsDirectoryPathForFiles(t *testing.T) {
+	tg, _ := newTestTelegram()
+	dir := t.TempDir()
+
+	err := tg.SendMessage(bus.OutboundMessage{
+		ChatID:    "42",
+		FilePaths: []string{dir},
+	})
+	if err == nil {
+		t.Fatal("expected error for directory file path, got nil")
 	}
 }
 
@@ -285,6 +521,19 @@ func writeTestImage(t *testing.T, name string) string {
 	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write test image: %v", err)
+	}
+	return path
+}
+
+func writeTestFile(t *testing.T, name string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create file dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("%PDF-1.7 test file"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
 	}
 	return path
 }

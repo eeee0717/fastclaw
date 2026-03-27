@@ -23,6 +23,7 @@ type messageArgs struct {
 	ChatID     string   `json:"chat_id"`
 	Text       string   `json:"text"`
 	MediaPaths []string `json:"media_paths"`
+	FilePaths  []string `json:"file_paths"`
 }
 
 // WithMessageDefaults attaches the current conversation routing fields to the tool context.
@@ -49,7 +50,7 @@ func RegisterMessage(r *Registry, mb *bus.MessageBus) {
 
 func registerMessage(r *Registry) {
 	// Register with a placeholder; will be re-registered with actual bus later.
-	r.Register("message", "Send a message or local image attachments to a channel. If channel/account_id/chat_id are omitted, the current conversation is used.", map[string]interface{}{
+	r.Register("message", "Send a message, local image attachments, or local files to a channel. If channel/account_id/chat_id are omitted, the current conversation is used.", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"channel": map[string]interface{}{
@@ -71,6 +72,13 @@ func registerMessage(r *Registry) {
 			"media_paths": map[string]interface{}{
 				"type":        "array",
 				"description": "Optional local file paths to send as image attachments. Currently supported by Telegram.",
+				"items": map[string]interface{}{
+					"type": "string",
+				},
+			},
+			"file_paths": map[string]interface{}{
+				"type":        "array",
+				"description": "Optional local file paths to send as document attachments. Currently supported by Telegram.",
 				"items": map[string]interface{}{
 					"type": "string",
 				},
@@ -101,8 +109,12 @@ func makeMessageTool(mb *bus.MessageBus) ToolFunc {
 		}
 
 		mediaPaths := compactStrings(args.MediaPaths)
-		if args.Text == "" && len(mediaPaths) == 0 {
-			return "", fmt.Errorf("text or media_paths is required")
+		filePaths := compactStrings(args.FilePaths)
+		if len(mediaPaths) > 0 && len(filePaths) > 0 {
+			return "", fmt.Errorf("media_paths and file_paths cannot be used together")
+		}
+		if args.Text == "" && len(mediaPaths) == 0 && len(filePaths) == 0 {
+			return "", fmt.Errorf("text, media_paths, or file_paths is required")
 		}
 
 		mb.Outbound <- bus.OutboundMessage{
@@ -111,6 +123,7 @@ func makeMessageTool(mb *bus.MessageBus) ToolFunc {
 			ChatID:     chatID,
 			Text:       args.Text,
 			MediaPaths: mediaPaths,
+			FilePaths:  filePaths,
 		}
 
 		return "Message sent", nil

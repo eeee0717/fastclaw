@@ -33,7 +33,8 @@ type OutboundMessage struct {
 	ParseMode    string             // "MarkdownV2", "HTML", ""
 	Buttons      [][]OutboundButton // inline keyboard rows
 	EditMsgID    string             // edit existing message instead of sending new
-	MediaPaths   []string           // file paths to attach (currently used for Telegram image sending via MEDIA:)
+	MediaPaths   []string           // local image file paths to attach
+	FilePaths    []string           // local file paths to attach as documents
 }
 
 // MessageBus is an async message queue backed by Go channels.

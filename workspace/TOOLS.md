@@ -17,8 +17,9 @@ Write content to a file. Creates parent directories as needed.
 List files and directories with size information.
 
 ### message
-Send text or local image attachments to the current conversation or a specific route.
-- Prefer this tool when the user asks you to send a message or local image to the current chat.
+Send text, local image attachments, or local files to the current conversation or a specific route.
+- Prefer this tool when the user asks you to send a message, local image, or local file to the current chat.
 - `media_paths` accepts local image file paths.
+- `file_paths` accepts local file paths to send as documents.
 - If `channel`, `account_id`, or `chat_id` are omitted, use the current conversation.
-- Put any user-facing text in `text`; when sending images, it will be used as the caption/message when supported.
+- Put any user-facing text in `text`; when sending images or files, it will be used as the caption/message when supported.

@@ -347,9 +347,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				)
 			}
 
-			// Check for MEDIA: protocol in tool output
+			// Check for attachment protocols in tool output.
 			if mediaPaths := extractMediaPaths(result); len(mediaPaths) > 0 {
 				a.sendMediaFiles(msg, mediaPaths)
+			}
+			if filePaths := extractFilePaths(result); len(filePaths) > 0 {
+				a.sendFileAttachments(msg, filePaths)
 			}
 
 			toolMsg := provider.Message{
@@ -520,9 +523,12 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 				slog.Warn("tool execution error", "agent", a.name, "name", tc.Function.Name, "error", execErr)
 			}
 
-			// Check for MEDIA: protocol in tool output
+			// Check for attachment protocols in tool output.
 			if mediaPaths := extractMediaPaths(result); len(mediaPaths) > 0 {
 				a.sendMediaFiles(msg, mediaPaths)
+			}
+			if filePaths := extractFilePaths(result); len(filePaths) > 0 {
+				a.sendFileAttachments(msg, filePaths)
 			}
 
 			toolMsg := provider.Message{Role: "tool", Content: result, ToolCallID: tc.ID, Name: tc.Function.Name}
@@ -571,14 +577,22 @@ func (a *Agent) ReloadWorkspaceFiles() {
 	a.ctxBuilder = NewContextBuilder(a.workspacePath, a.memory, skillsSummary)
 }
 
-// extractMediaPaths scans tool output for MEDIA: lines and returns file paths.
-// The MEDIA: protocol is used by OpenClaw skills to attach files to chat messages.
+// extractMediaPaths scans tool output for MEDIA: lines and returns image file paths.
 func extractMediaPaths(output string) []string {
+	return extractAttachmentPaths(output, "MEDIA:")
+}
+
+// extractFilePaths scans tool output for FILE: lines and returns file paths.
+func extractFilePaths(output string) []string {
+	return extractAttachmentPaths(output, "FILE:")
+}
+
+func extractAttachmentPaths(output string, prefix string) []string {
 	var paths []string
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "MEDIA:") {
-			path := strings.TrimSpace(strings.TrimPrefix(line, "MEDIA:"))
+		if strings.HasPrefix(line, prefix) {
+			path := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 			if path != "" {
 				if _, err := os.Stat(path); err == nil {
 					paths = append(paths, path)
@@ -604,5 +618,23 @@ func (a *Agent) sendMediaFiles(msg bus.InboundMessage, mediaPaths []string) {
 	case a.messageBus.Outbound <- outMsg:
 	default:
 		slog.Warn("outbound channel full, dropping media message", "agent", a.name)
+	}
+}
+
+// sendFileAttachments sends extracted FILE: files to the outbound bus.
+func (a *Agent) sendFileAttachments(msg bus.InboundMessage, filePaths []string) {
+	if len(filePaths) == 0 || a.messageBus == nil {
+		return
+	}
+	outMsg := bus.OutboundMessage{
+		Channel:   msg.Channel,
+		AccountID: msg.AccountID,
+		ChatID:    msg.ChatID,
+		FilePaths: filePaths,
+	}
+	select {
+	case a.messageBus.Outbound <- outMsg:
+	default:
+		slog.Warn("outbound channel full, dropping file message", "agent", a.name)
 	}
 }
