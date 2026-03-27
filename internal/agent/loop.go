@@ -207,8 +207,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// Hook: AfterSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt})
 
-	runtimeCtx := a.ctxBuilder.BuildRuntimeContext(msg.Channel, msg.ChatID)
+	runtimeCtx := a.ctxBuilder.BuildRuntimeContext(msg.Channel, msg.AccountID, msg.ChatID)
 	userContent := runtimeCtx + "\n\n" + msg.Text
+	toolCtx := tools.WithMessageDefaults(ctx, msg)
 
 	// Build user message - include image if present
 	userMsg := provider.Message{Role: "user", Content: userContent}
@@ -325,7 +326,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				"id", tc.ID,
 			)
 
-			result, err := a.registry.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
+			result, err := a.registry.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 
 			// Hook: AfterToolCall
 			hcToolAfter := &HookContext{
@@ -388,8 +389,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt})
 
-	runtimeCtx := a.ctxBuilder.BuildRuntimeContext(msg.Channel, msg.ChatID)
+	runtimeCtx := a.ctxBuilder.BuildRuntimeContext(msg.Channel, msg.AccountID, msg.ChatID)
 	userContent := runtimeCtx + "\n\n" + msg.Text
+	toolCtx := tools.WithMessageDefaults(ctx, msg)
 
 	userMsg := provider.Message{Role: "user", Content: userContent}
 	if msg.PhotoURL != "" {
@@ -509,7 +511,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			hcToolBefore := &HookContext{AgentName: a.name, Point: BeforeToolCall, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments}
 			a.hooks.Run(ctx, hcToolBefore)
 
-			result, execErr := a.registry.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
+			result, execErr := a.registry.Execute(toolCtx, tc.Function.Name, tc.Function.Arguments)
 
 			hcToolAfter := &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: tc.Function.Name, ToolResult: result, Error: execErr, StartTime: hcToolBefore.StartTime}
 			a.hooks.Run(ctx, hcToolAfter)

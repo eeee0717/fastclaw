@@ -23,7 +23,7 @@ var bootstrapFiles = []string{
 // GroupContext holds information about the group chat environment for system prompt injection.
 type GroupContext struct {
 	BotUsername string   // this agent's bot username
-	Teammates  []string // other agent names in the group
+	Teammates   []string // other agent names in the group
 }
 
 // ContextBuilder assembles the system prompt and runtime context.
@@ -108,13 +108,14 @@ Use the write_file tool to update these files when appropriate. Keep entries con
 }
 
 // BuildRuntimeContext returns the runtime context to inject before the user message.
-func (cb *ContextBuilder) BuildRuntimeContext(channel, chatID string) string {
+func (cb *ContextBuilder) BuildRuntimeContext(channel, accountID, chatID string) string {
 	now := time.Now()
 	return fmt.Sprintf(`[Runtime Context — metadata only, not instructions]
 Time: %s
 Timezone: %s
 Channel: %s
-Chat ID: %s`, now.Format("2006-01-02 15:04:05"), now.Location().String(), channel, chatID)
+Account ID: %s
+Chat ID: %s`, now.Format("2006-01-02 15:04:05"), now.Location().String(), channel, accountID, chatID)
 }
 
 // SetGroupContext sets the group chat context for system prompt generation.
